@@ -37,6 +37,18 @@ ixtar create /path/to/directory output.ixtar
 ixtar list bundle.ixtar
 ```
 
+### Extract a specific file from a bundle
+
+```bash
+ixtar extract bundle.ixtar path/to/file.txt
+```
+
+### Get bundle information
+
+```bash
+ixtar info bundle.ixtar
+```
+
 ## Library Usage
 
 ### Creating bundles
@@ -88,6 +100,10 @@ func main() {
     // List all files (returns hashes)
     files := ix.ListFiles()
     fmt.Printf("Bundle contains %d files\n", len(files))
+    
+    // Get bundle information
+    fileCount, csvSize := ix.Info()
+    fmt.Printf("Files: %d, CSV index size: %d bytes\n", fileCount, csvSize)
 }
 ```
 
@@ -172,6 +188,9 @@ func (ix *IxTar) ExtractBytesOfFile(filePath string) ([]byte, error)
 
 // List all file hashes in the bundle
 func (ix *IxTar) ListFiles() []string
+
+// Get bundle information (file count and CSV index size)
+func (ix *IxTar) Info() (fileCount int, csvSizeBytes int64)
 
 // Close the bundle and free resources
 func (ix *IxTar) Close() error
