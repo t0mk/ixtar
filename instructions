@@ -1,0 +1,38 @@
+create github.com/t0mk/ixtar, ixtar is a library to create and read ixtarr bundles. ixtar bundle is file consisting of csv and tarfile. the csv is serialization of 
+
+// FileIndex represents information about a file's position in the TAR
+type FileIndex struct {
+	Start int64 `json:"start"` // Starting byte position in TAR
+	Size  int64 `json:"size"`  // Size of the file in bytes
+}
+
+// TarIndex represents the full index of a TAR file
+type TarIndex struct {
+	Files map[string]FileIndex `json:"files"` // List of files in the TAR
+}
+
+The key in TarIndex is not file part in tar, but its hash from hashFilePath
+
+
+func hashFilePath(filePath string) string {
+	h := md5.New()
+	h.Write([]byte(filePath))
+	return hex.EncodeToString(h.Sum(nil))[:HashLen]
+}
+
+The path is cleaned before hashed.
+
+cleanFilePath := filepath.Clean(header.Name)
+
+The csv in the bundle is serialization of TarIndex.
+
+There should be some struct IxTar, which has method ExtractBytesOfFile(filePath string) ([]byte, error)
+IxTar should be possible to load by reading only the csv index. extracting file should only seek in the bundle and load bytes.
+
+ixtar should allow to
+- create bundle from directory (via cli tool)
+- list files (only based on csv index) (via same cli tool)
+- create IxTar bundle
+- retrieve bytes of file by method of ExtractBytesOfFile
+
+Create also tests that create temporary directories and test the functionality.
