@@ -57,12 +57,12 @@ func main() {
 		}
 
 	case "extract":
-		if len(os.Args) != 4 {
-			fmt.Fprintf(os.Stderr, "Usage: ixtar extract <bundle.ixtar> <file-path>\n")
+		if len(os.Args) < 4 {
+			fmt.Fprintf(os.Stderr, "Usage: ixtar extract <bundle.ixtar> <file-path> [file-path...]\n")
 			os.Exit(1)
 		}
 		bundlePath := os.Args[2]
-		filePath := os.Args[3]
+		filePaths := os.Args[3:]
 		
 		ix, err := ixtar.NewIxTar(bundlePath)
 		if err != nil {
@@ -70,12 +70,13 @@ func main() {
 		}
 		defer ix.Close()
 		
-		data, err := ix.ExtractBytesOfFile(filePath)
-		if err != nil {
-			log.Fatalf("Failed to extract file: %v", err)
+		for _, filePath := range filePaths {
+			data, err := ix.ExtractBytesOfFile(filePath)
+			if err != nil {
+				log.Fatalf("Failed to extract file %s: %v", filePath, err)
+			}
+			os.Stdout.Write(data)
 		}
-		
-		os.Stdout.Write(data)
 
 	case "info":
 		if len(os.Args) != 3 {
@@ -106,6 +107,6 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  ixtar create <directory> <output.ixtar>\n")
 	fmt.Fprintf(os.Stderr, "  ixtar list <bundle.ixtar>\n")
-	fmt.Fprintf(os.Stderr, "  ixtar extract <bundle.ixtar> <file-path>\n")
+	fmt.Fprintf(os.Stderr, "  ixtar extract <bundle.ixtar> <file-path> [file-path...]\n")
 	fmt.Fprintf(os.Stderr, "  ixtar info <bundle.ixtar>\n")
 }

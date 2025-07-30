@@ -1,7 +1,6 @@
 package ixtar
 
 import (
-	"archive/tar"
 	"bytes"
 	"crypto/md5"
 	"encoding/binary"
@@ -21,17 +20,16 @@ type FileIndex struct {
 	Size  int64 `json:"size"`
 }
 
-type TarIndex struct {
+type DataIndex struct {
 	Files map[string]FileIndex `json:"files"`
 }
 
 type IxTar struct {
 	bundlePath string
-	index      TarIndex
+	index      DataIndex
 	csvSize    int64
 	file       *os.File
-	tarReader  *tar.Reader
-	tarOffset  int64
+	dataOffset int64
 }
 
 func hashFilePath(filePath string) string {
@@ -66,46 +64,39 @@ func NewIxTar(bundlePath string) (*IxTar, error) {
 		return nil, fmt.Errorf("failed to parse CSV index: %w", err)
 	}
 
-	tarOffset := 32 + csvSize
-	if _, err := file.Seek(tarOffset, io.SeekStart); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("failed to seek to TAR start: %w", err)
-	}
-
-	tarReader := tar.NewReader(file)
+	dataOffset := 32 + csvSize
 
 	return &IxTar{
 		bundlePath: bundlePath,
 		index:      index,
 		csvSize:    csvSize,
 		file:       file,
-		tarReader:  tarReader,
-		tarOffset:  tarOffset,
+		dataOffset: dataOffset,
 	}, nil
 }
 
-func parseCSVIndex(csvData []byte) (TarIndex, error) {
+func parseCSVIndex(csvData []byte) (DataIndex, error) {
 	reader := csv.NewReader(bytes.NewReader(csvData))
 	records, err := reader.ReadAll()
 	if err != nil {
-		return TarIndex{}, fmt.Errorf("failed to parse CSV: %w", err)
+		return DataIndex{}, fmt.Errorf("failed to parse CSV: %w", err)
 	}
 
-	index := TarIndex{Files: make(map[string]FileIndex)}
+	index := DataIndex{Files: make(map[string]FileIndex)}
 	for _, record := range records {
 		if len(record) != 3 {
-			return TarIndex{}, fmt.Errorf("invalid CSV record: expected 3 fields, got %d", len(record))
+			return DataIndex{}, fmt.Errorf("invalid CSV record: expected 3 fields, got %d", len(record))
 		}
 
 		hash := record[0]
 		start, err := strconv.ParseInt(record[1], 10, 64)
 		if err != nil {
-			return TarIndex{}, fmt.Errorf("invalid start position: %w", err)
+			return DataIndex{}, fmt.Errorf("invalid start position: %w", err)
 		}
 
 		size, err := strconv.ParseInt(record[2], 10, 64)
 		if err != nil {
-			return TarIndex{}, fmt.Errorf("invalid file size: %w", err)
+			return DataIndex{}, fmt.Errorf("invalid file size: %w", err)
 		}
 
 		index.Files[hash] = FileIndex{Start: start, Size: size}
@@ -122,43 +113,31 @@ func (ix *IxTar) Close() error {
 }
 
 func (ix *IxTar) ExtractBytesOfFile(filePath string) ([]byte, error) {
+	if ix == nil {
+		return nil, fmt.Errorf("IxTar instance is nil")
+	}
+	
 	cleanPath := filepath.Clean(filePath)
 	hash := hashFilePath(cleanPath)
 
-	if _, exists := ix.index.Files[hash]; !exists {
+	fileIndex, exists := ix.index.Files[hash]
+	if !exists {
 		return nil, fmt.Errorf("file not found: %s", filePath)
 	}
 
-	if _, err := ix.file.Seek(ix.tarOffset, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("failed to seek to TAR start: %w", err)
+	// Seek to the file position within the raw data
+	fileOffset := ix.dataOffset + fileIndex.Start
+	if _, err := ix.file.Seek(fileOffset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("failed to seek to file position: %w", err)
 	}
 
-	ix.tarReader = tar.NewReader(ix.file)
-
-	for {
-		header, err := ix.tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read TAR header: %w", err)
-		}
-
-		headerCleanPath := filepath.Clean(header.Name)
-		if headerCleanPath == cleanPath {
-			if header.Typeflag != tar.TypeReg {
-				return nil, fmt.Errorf("file is not a regular file: %s", filePath)
-			}
-
-			data := make([]byte, header.Size)
-			if _, err := io.ReadFull(ix.tarReader, data); err != nil {
-				return nil, fmt.Errorf("failed to read file data: %w", err)
-			}
-			return data, nil
-		}
+	// Read the file data directly
+	data := make([]byte, fileIndex.Size)
+	if _, err := io.ReadFull(ix.file, data); err != nil {
+		return nil, fmt.Errorf("failed to read file data: %w", err)
 	}
 
-	return nil, fmt.Errorf("file not found in TAR: %s", filePath)
+	return data, nil
 }
 
 func (ix *IxTar) ListFiles() []string {
@@ -180,16 +159,23 @@ func CreateBundle(sourceDir, bundlePath string) error {
 }
 
 func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCallback) error {
-	// Create temporary file for tar data
-	tmpTarFile, err := os.CreateTemp("", "ixtar-tar-*.tmp")
+	// Create temporary file for raw file data
+	tmpDataFile, err := os.CreateTemp("", "ixtar-data-*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to create temp tar file: %w", err)
+		return fmt.Errorf("failed to create temp data file: %w", err)
 	}
-	defer os.Remove(tmpTarFile.Name())
-	defer tmpTarFile.Close()
+	defer os.Remove(tmpDataFile.Name())
+	defer tmpDataFile.Close()
 
-	// Phase 1: Create tar file without index
-	tarWriter := tar.NewWriter(tmpTarFile)
+	// Create temporary CSV file
+	tmpCsvFile, err := os.CreateTemp("", "ixtar-csv-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp csv file: %w", err)
+	}
+	defer os.Remove(tmpCsvFile.Name())
+	defer tmpCsvFile.Close()
+
+	csvWriter := csv.NewWriter(tmpCsvFile)
 
 	// Count files first if progress callback is provided
 	totalFiles := 0
@@ -199,7 +185,7 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 				return nil
 			}
 			relPath, err := filepath.Rel(sourceDir, path)
-			if err != nil || relPath == "." {
+			if err != nil || relPath == "." || info.IsDir() {
 				return nil
 			}
 			totalFiles++
@@ -207,8 +193,11 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 		})
 	}
 
-	// Create tar file - no hash tracking needed
+	// Phase 1: Create raw data file and build index simultaneously
 	currentFile := 0
+	currentPos := int64(0) // Track position in raw data file
+	csvFileCount := 0
+
 	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -219,7 +208,7 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 			return err
 		}
 
-		if relPath == "." {
+		if relPath == "." || info.IsDir() {
 			return nil
 		}
 
@@ -228,82 +217,17 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 			if progress != nil {
 				progress(currentFile, totalFiles, "")
 			}
-			if err := tarWriter.Flush(); err != nil {
-				return err
-			}
-		}
-
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-
-		header.Name = relPath
-		if err := tarWriter.WriteHeader(header); err != nil {
-			return err
 		}
 
 		if info.Mode().IsRegular() {
-			file, err := os.Open(path)
-			if err != nil {
-				return err
-			}
+			cleanPath := filepath.Clean(relPath)
+			hash := hashFilePath(cleanPath)
 
-			buf := make([]byte, 32*1024) // 32KB buffer
-			_, err = io.CopyBuffer(tarWriter, file, buf)
-			file.Close()
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to walk directory: %w", err)
-	}
-
-	if err := tarWriter.Close(); err != nil {
-		return fmt.Errorf("failed to close tar writer: %w", err)
-	}
-
-	// Phase 2: Read tar file and build index
-	tmpCsvFile, err := os.CreateTemp("", "ixtar-csv-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp csv file: %w", err)
-	}
-	defer os.Remove(tmpCsvFile.Name())
-	defer tmpCsvFile.Close()
-
-	csvWriter := csv.NewWriter(tmpCsvFile)
-
-	if _, err := tmpTarFile.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek tar file: %w", err)
-	}
-
-	tarReader := tar.NewReader(tmpTarFile)
-	currentPos := int64(0)
-	csvFileCount := 0
-
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read tar header: %w", err)
-		}
-
-		cleanPath := filepath.Clean(header.Name)
-		hash := hashFilePath(cleanPath)
-
-		if header.Typeflag == tar.TypeReg {
-			// Write CSV record for regular files only
+			// Record position in CSV - this is where file data starts
 			record := []string{
 				hash,
 				strconv.FormatInt(currentPos, 10),
-				strconv.FormatInt(header.Size, 10),
+				strconv.FormatInt(info.Size(), 10),
 			}
 			if err := csvWriter.Write(record); err != nil {
 				return fmt.Errorf("failed to write CSV record: %w", err)
@@ -317,17 +241,28 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 				}
 			}
 
-			// Skip file data to get to next header
-			if _, err := io.CopyN(io.Discard, tarReader, header.Size); err != nil {
-				return fmt.Errorf("failed to skip file data: %w", err)
+			// Write file data directly to raw data file
+			file, err := os.Open(path)
+			if err != nil {
+				return err
 			}
+
+			buf := make([]byte, 32*1024) // 32KB buffer
+			written, err := io.CopyBuffer(tmpDataFile, file, buf)
+			file.Close()
+			if err != nil {
+				return err
+			}
+
+			// Update position
+			currentPos += written
 		}
 
-		// Update position for next file
-		currentPos, err = tmpTarFile.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return fmt.Errorf("failed to get current position: %w", err)
-		}
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	csvWriter.Flush()
@@ -341,7 +276,7 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 		return fmt.Errorf("failed to get CSV size: %w", err)
 	}
 
-	// Phase 3: Assemble final bundle
+	// Phase 2: Assemble final bundle
 	bundleFile, err := os.Create(bundlePath)
 	if err != nil {
 		return fmt.Errorf("failed to create bundle file: %w", err)
@@ -364,37 +299,15 @@ func CreateBundleWithProgress(sourceDir, bundlePath string, progress ProgressCal
 		return fmt.Errorf("failed to copy CSV data: %w", err)
 	}
 
-	// Copy tar data
-	if _, err := tmpTarFile.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek tar temp file: %w", err)
+	// Copy raw data
+	if _, err := tmpDataFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek data temp file: %w", err)
 	}
 
-	if _, err := io.Copy(bundleFile, tmpTarFile); err != nil {
-		return fmt.Errorf("failed to copy TAR data: %w", err)
+	if _, err := io.Copy(bundleFile, tmpDataFile); err != nil {
+		return fmt.Errorf("failed to copy raw data: %w", err)
 	}
 
 	return nil
 }
 
-func generateCSV(index TarIndex) ([]byte, error) {
-	var buf bytes.Buffer
-	writer := csv.NewWriter(&buf)
-
-	for hash, fileIndex := range index.Files {
-		record := []string{
-			hash,
-			strconv.FormatInt(fileIndex.Start, 10),
-			strconv.FormatInt(fileIndex.Size, 10),
-		}
-		if err := writer.Write(record); err != nil {
-			return nil, err
-		}
-	}
-
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
-}
