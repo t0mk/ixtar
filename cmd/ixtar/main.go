@@ -96,6 +96,27 @@ func main() {
 		fmt.Printf("Files: %d\n", fileCount)
 		fmt.Printf("CSV index size: %d bytes\n", csvSize)
 
+	case "extract-tar":
+		if len(os.Args) != 4 {
+			fmt.Fprintf(os.Stderr, "Usage: ixtar extract-tar <bundle.ixtar> <output-directory>\n")
+			os.Exit(1)
+		}
+		bundlePath := os.Args[2]
+		outputDir := os.Args[3]
+		
+		ix, err := ixtar.NewIxTar(bundlePath)
+		if err != nil {
+			log.Fatalf("Failed to open bundle: %v", err)
+		}
+		defer ix.Close()
+		
+		err = ix.ExtractAll(outputDir)
+		if err != nil {
+			log.Fatalf("Failed to extract bundle: %v", err)
+		}
+		
+		fmt.Printf("Bundle extracted to: %s\n", outputDir)
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		printUsage()
@@ -108,5 +129,6 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  ixtar create <directory> <output.ixtar>\n")
 	fmt.Fprintf(os.Stderr, "  ixtar list <bundle.ixtar>\n")
 	fmt.Fprintf(os.Stderr, "  ixtar extract <bundle.ixtar> <file-path> [file-path...]\n")
+	fmt.Fprintf(os.Stderr, "  ixtar extract-tar <bundle.ixtar> <output-directory>\n")
 	fmt.Fprintf(os.Stderr, "  ixtar info <bundle.ixtar>\n")
 }

@@ -152,6 +152,38 @@ func (ix *IxTar) Info() (fileCount int, csvSizeBytes int64) {
 	return len(ix.index.Files), ix.csvSize
 }
 
+func (ix *IxTar) ExtractAll(outputDir string) error {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	for hash, fileIndex := range ix.index.Files {
+		fileOffset := ix.dataOffset + fileIndex.Start
+		if _, err := ix.file.Seek(fileOffset, io.SeekStart); err != nil {
+			return fmt.Errorf("failed to seek to file position: %w", err)
+		}
+
+		data := make([]byte, fileIndex.Size)
+		if _, err := io.ReadFull(ix.file, data); err != nil {
+			return fmt.Errorf("failed to read file data: %w", err)
+		}
+
+		outputPath := filepath.Join(outputDir, hash)
+		outputFile, err := os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to create output file %s: %w", outputPath, err)
+		}
+
+		if _, err := outputFile.Write(data); err != nil {
+			outputFile.Close()
+			return fmt.Errorf("failed to write file %s: %w", outputPath, err)
+		}
+		outputFile.Close()
+	}
+
+	return nil
+}
+
 type ProgressCallback func(current, total int, filename string)
 
 func CreateBundle(sourceDir, bundlePath string) error {
